@@ -1,26 +1,40 @@
 import numpy as np
 import pandas as pd
 
-def simulate_pipeline_data(n_points=200, save_path=None):
-    np.random.seed(42)
+from src.config import DEMO_CONFIG, PipelineConfig
 
+
+def simulate_pipeline_data(
+    n_points=200,
+    save_path=None,
+    config: PipelineConfig = DEMO_CONFIG,
+    leak_start=80,
+    leak_end=100,
+):
+    """Generate Digital Twin pressure data for the prototype.
+
+    The default 40–60 PSI envelope is a demonstration parameter only.
+    It must be replaced by asset-specific engineering/operating limits
+    before any real deployment.
+    """
+    rng = np.random.default_rng(42)
     time = np.arange(n_points)
 
-    # Normal pressure
-    pressure = np.random.normal(loc=110, scale=5, size=n_points)
+    # Keep normal operation inside the demonstration envelope.
+    pressure = rng.normal(loc=50.0, scale=2.0, size=n_points)
 
-    # Leak event
-    leak_start, leak_end = 80, 100
-    pressure[leak_start:leak_end] = np.random.normal(loc=70, scale=5, size=(leak_end - leak_start))
+    # Simulated leak / pressure-loss event.
+    pressure[leak_start:leak_end] = rng.normal(
+        loc=32.0,
+        scale=2.0,
+        size=leak_end - leak_start,
+    )
 
-    # Gradual corrosion
+    # Gradual degradation after the simulated event.
     for i in range(120, n_points):
-        pressure[i] -= (i - 120) * 0.2
+        pressure[i] -= (i - 120) * 0.12
 
-    data = pd.DataFrame({
-        "time": time,
-        "pressure": pressure
-    })
+    data = pd.DataFrame({"time": time, "pressure": pressure})
 
     if save_path:
         data.to_csv(save_path, index=False)
