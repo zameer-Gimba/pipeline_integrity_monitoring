@@ -26,7 +26,7 @@ from src.scenario import (
     next_pressure,
     stage_at,
 )
-from src.simulator import seed_history
+from src.live_history import seed_history
 from src.tamper import TamperMonitor
 from src.visualization import plot_live_window
 
@@ -74,62 +74,42 @@ st_autorefresh(interval=int(TICK_SECONDS * 1000), key="tick")
 with st.sidebar:
     st.header("Scripted Demo")
     st.caption(
-        f"Runs the full Normal \u2192 Abnormality \u2192 Alert \u2192 Heartbeat Loss "
-        f"\u2192 Offline \u2192 Tamper \u2192 Recovery sequence in "
-        f"~{int(TOTAL_DURATION)}s, for recording."
+        f"Runs the full Normal → Abnormality → Alert → Heartbeat Loss "
+        f"→ Offline → Tamper → Recovery sequence in ~{int(TOTAL_DURATION)}s."
     )
 
     if not st.session_state.demo_running:
-        if st.button("\u25b6 Start Scripted Demo", use_container_width=True, type="primary"):
+        if st.button(
+            "▶ Start Scripted Demo",
+            use_container_width=True,
+            type="primary",
+        ):
             st.session_state.demo_running = True
             st.session_state.demo_start_ts = time.time()
     else:
         _elapsed_preview = min(
             time.time() - st.session_state.demo_start_ts, TOTAL_DURATION
         )
-        st.write(f"Running \u2014 {_elapsed_preview:0.0f}s / {int(TOTAL_DURATION)}s")
-        if st.button("\u23f9 Reset Demo", use_container_width=True):
+        st.write(f"Running — {_elapsed_preview:0.0f}s / {int(TOTAL_DURATION)}s")
+        if st.button("⏹ Reset Demo", use_container_width=True):
             st.session_state.demo_running = False
             st.session_state.demo_start_ts = None
             st.session_state.history = deque(
-                seed_history(BUFFER_SIZE, rng=st.session_state.rng), maxlen=BUFFER_SIZE
+                seed_history(BUFFER_SIZE, rng=st.session_state.rng),
+                maxlen=BUFFER_SIZE,
             )
-            st.session_state.heartbeat = HeartbeatMonitor(LIVE_HEARTBEAT_OFFLINE_SECONDS)
+            st.session_state.heartbeat = HeartbeatMonitor(
+                LIVE_HEARTBEAT_OFFLINE_SECONDS
+            )
             st.session_state.heartbeat.receive()
             st.session_state.tamper.set_state(False)
 
-    st.divider()
-    st.subheader("MQTT (for future Raspberry Pi / hardware integration)")
-    manual_disabled = st.session_state.demo_running
-    if manual_disabled:
-        st.caption("Disabled while the scripted demo is running.")
-
-    mqtt_enabled = st.checkbox("Enable MQTT", value=False, disabled=manual_disabled)
-    broker = st.text_input(
-        "MQTT broker", value=os.getenv("MQTT_BROKER", ""), disabled=manual_disabled
+    st.caption(
+        "The recorded walkthrough is driven by a deterministic test scenario. "
+        "MQTT remains available through the application integration layer for "
+        "future Raspberry Pi/field telemetry; it is intentionally not exposed "
+        "as a manual demo control."
     )
-    port = st.number_input(
-        "MQTT port", min_value=1, max_value=65535, value=1883, disabled=manual_disabled
-    )
-    topic = st.text_input(
-        "MQTT topic", value="pipeline/prototype/telemetry", disabled=manual_disabled
-    )
-
-    if mqtt_enabled and st.session_state.mqtt is None and not manual_disabled:
-        if broker:
-            try:
-                client = MQTTClient(broker, int(port), topic)
-                client.connect()
-                st.session_state.mqtt = client
-                st.success("MQTT connected")
-            except Exception as exc:
-                st.error(f"MQTT connection failed: {exc}")
-        else:
-            st.info("Enter a broker address to enable MQTT.")
-
-    if not mqtt_enabled and st.session_state.mqtt is not None:
-        st.session_state.mqtt.disconnect()
-        st.session_state.mqtt = None
 
 # ---------------------------------------------------------------------------
 # Which scenario stage are we in right now?
@@ -142,6 +122,20 @@ else:
     elapsed = None
     stage = IDLE_STAGE
     effective_online = True
+
+# MQTT is deliberately not exposed as a manual dashboard control.
+# If MQTT_BROKER is configured in the deployment environment, the prototype
+# publishes telemetry automatically; otherwise the demo remains fully local.
+if st.session_state.mqtt is None and os.getenv("MQTT_BROKER"):
+    try:
+        st.session_state.mqtt = MQTTClient(
+            os.getenv("MQTT_BROKER"),
+            int(os.getenv("MQTT_PORT", "1883")),
+            os.getenv("MQTT_TOPIC", "pipeline/prototype/telemetry"),
+        )
+        st.session_state.mqtt.connect()
+    except Exception:
+        st.session_state.mqtt = None
 
 # ---------------------------------------------------------------------------
 # Live tick: at most once per TICK_SECONDS, generate/hold a pressure
