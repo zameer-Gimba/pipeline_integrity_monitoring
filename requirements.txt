@@ -4,3 +4,4 @@ matplotlib
 scikit-learn
 streamlit
 paho-mqtt
+streamlit-autorefresh
