@@ -40,3 +40,14 @@ def simulate_pipeline_data(
         data.to_csv(save_path, index=False)
 
     return data
+
+
+def seed_history(n_points=90, start_pressure=50.0, noise=1.3, rng=None):
+    """Build an initial rolling buffer of near-normal pressure readings.
+
+    Used to seed the live/scripted demo so the chart shows a settled
+    trend line the moment the page loads, instead of an empty plot or a
+    single point.
+    """
+    rng = rng if rng is not None else np.random.default_rng()
+    return list(start_pressure + rng.normal(0, noise, size=n_points))
