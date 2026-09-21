@@ -15,6 +15,8 @@ from src.detector import (
     detect_anomalies_ai,
     detect_anomalies_threshold,
     detect_anomalies_zscore,
+    detect_current_ai,
+    reference_z_score,
 )
 from src.heartbeat import HeartbeatMonitor
 from src.mqtt_client import MQTTClient
@@ -30,20 +32,17 @@ from src.live_history import seed_history
 from src.tamper import TamperMonitor
 from src.visualization import plot_live_window
 
-BUFFER_SIZE = 90     # rolling window length shown on the chart
-TICK_SECONDS = 1.0   # how often a new live reading is generated
+BUFFER_SIZE = 90
+TICK_SECONDS = 1.0
 
 st.set_page_config(page_title="Pipeline Integrity Monitoring", layout="wide")
 st.title("Pipeline Integrity Monitoring System")
 st.caption(
-    "Prototype demonstration. Pressure thresholds are demonstration parameters "
-    "and must be replaced by asset-specific NNPC/NPSC engineering data for deployment."
+    "Prototype demonstration. Pressure thresholds shown here are demonstration "
+    "parameters and must be replaced by the specific asset's engineering and "
+    "operating data for deployment."
 )
 
-# ---------------------------------------------------------------------------
-# Session state — everything here persists across the autorefresh reruns
-# that make the dashboard feel live.
-# ---------------------------------------------------------------------------
 if "rng" not in st.session_state:
     st.session_state.rng = np.random.default_rng()
 if "history" not in st.session_state:
@@ -64,13 +63,8 @@ if "demo_start_ts" not in st.session_state:
 if "last_tick_ts" not in st.session_state:
     st.session_state.last_tick_ts = 0.0
 
-# Tick the whole app once a second even with no user interaction — this is
-# what makes the chart scroll and the badges update on their own.
 st_autorefresh(interval=int(TICK_SECONDS * 1000), key="tick")
 
-# ---------------------------------------------------------------------------
-# Sidebar — scripted demo controls + manual/interactive controls
-# ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Scripted Demo")
     st.caption(
@@ -105,15 +99,11 @@ with st.sidebar:
             st.session_state.tamper.set_state(False)
 
     st.caption(
-        "The recorded walkthrough is driven by a deterministic test scenario. "
-        "MQTT remains available through the application integration layer for "
-        "future Raspberry Pi/field telemetry; it is intentionally not exposed "
-        "as a manual demo control."
+        "The walkthrough is driven by a deterministic test scenario. "
+        "MQTT remains available through the application integration layer "
+        "for external telemetry when configured."
     )
 
-# ---------------------------------------------------------------------------
-# Which scenario stage are we in right now?
-# ---------------------------------------------------------------------------
 if st.session_state.demo_running:
     elapsed = min(time.time() - st.session_state.demo_start_ts, TOTAL_DURATION)
     stage = stage_at(elapsed)
@@ -123,9 +113,6 @@ else:
     stage = IDLE_STAGE
     effective_online = True
 
-# MQTT is deliberately not exposed as a manual dashboard control.
-# If MQTT_BROKER is configured in the deployment environment, the prototype
-# publishes telemetry automatically; otherwise the demo remains fully local.
 if st.session_state.mqtt is None and os.getenv("MQTT_BROKER"):
     try:
         st.session_state.mqtt = MQTTClient(
@@ -137,10 +124,6 @@ if st.session_state.mqtt is None and os.getenv("MQTT_BROKER"):
     except Exception:
         st.session_state.mqtt = None
 
-# ---------------------------------------------------------------------------
-# Live tick: at most once per TICK_SECONDS, generate/hold a pressure
-# reading and update heartbeat/tamper accordingly.
-# ---------------------------------------------------------------------------
 now = time.time()
 if now - st.session_state.last_tick_ts >= TICK_SECONDS:
     st.session_state.last_tick_ts = now
@@ -150,29 +133,36 @@ if now - st.session_state.last_tick_ts >= TICK_SECONDS:
         new_pressure = next_pressure(prev_pressure, stage, st.session_state.rng)
         st.session_state.heartbeat.receive()
     else:
-        # Comms are down — no fresh telemetry arrives, so the trend line
-        # holds at the last known value instead of magically continuing.
         new_pressure = prev_pressure
 
     st.session_state.history.append(new_pressure)
 
     if st.session_state.demo_running:
         st.session_state.tamper.set_state(stage.tamper_active)
-    # else: tamper state is already controlled by the manual buttons above.
 
-# ---------------------------------------------------------------------------
-# Build the current window + run detection on it
-# ---------------------------------------------------------------------------
 history_list = list(st.session_state.history)
 window = pd.DataFrame(
     {"time": np.arange(len(history_list)), "pressure": history_list}
 )
 
 pressure = float(window["pressure"].iloc[-1])
-z_anomalies = detect_anomalies_zscore(window, threshold=DEMO_CONFIG.z_score_alert)
-ai_anomalies = detect_anomalies_ai(window)
+
+# Every status below is evaluated from the same current reading/reference
+# system. Historical counts are kept separate and never drive the badges.
+z_anomalies = detect_anomalies_zscore(window, config=DEMO_CONFIG)
+ai_anomalies = detect_anomalies_ai(window, config=DEMO_CONFIG)
 threshold_anomalies = detect_anomalies_threshold(
-    window, upper=DEMO_CONFIG.pressure_upper_psi, lower=DEMO_CONFIG.pressure_lower_psi
+    window,
+    upper=DEMO_CONFIG.pressure_upper_psi,
+    lower=DEMO_CONFIG.pressure_lower_psi,
+    config=DEMO_CONFIG,
+)
+
+z_score_now = reference_z_score(pressure, DEMO_CONFIG)
+ai_alert_now, ai_score_now = detect_current_ai(pressure, DEMO_CONFIG)
+threshold_alert = (
+    pressure < DEMO_CONFIG.pressure_lower_psi
+    or pressure > DEMO_CONFIG.pressure_upper_psi
 )
 
 if st.session_state.mqtt is not None:
@@ -185,10 +175,6 @@ if st.session_state.mqtt is not None:
         }
     )
 
-# Three-tier node status: ONLINE -> DEGRADED (heartbeat interruption
-# window) -> OFFLINE. Uses the real HeartbeatMonitor's elapsed-time math,
-# just tuned to demo-appropriate thresholds instead of real deployment
-# timeouts (which would be far longer).
 seconds_since = st.session_state.heartbeat.seconds_since_last_seen()
 if seconds_since is None or seconds_since <= LIVE_HEARTBEAT_WARNING_SECONDS:
     node_status = "ONLINE"
@@ -197,22 +183,38 @@ elif seconds_since <= LIVE_HEARTBEAT_OFFLINE_SECONDS:
 else:
     node_status = "OFFLINE"
 
-threshold_alert = (
-    pressure < DEMO_CONFIG.pressure_lower_psi
-    or pressure > DEMO_CONFIG.pressure_upper_psi
-)
+z_alert_now = abs(z_score_now) > DEMO_CONFIG.z_score_alert
 
-# Both detection badges answer the SAME question the Pressure/Engineering
-# badges answer — "is the CURRENT reading anomalous?" — not "does an
-# anomaly exist anywhere in this window?". That mismatch was the original
-# bug where SAFE/ALERT/ANOMALOUS could contradict each other.
-current_index = len(window) - 1
-z_alert_now = current_index in set(z_anomalies)
-ai_alert_now = current_index in set(ai_anomalies)
+# Transparent interpretation of disagreements between layers. An AI-only
+# signal is intentionally not relabeled as an engineering failure; it is
+# surfaced so the operator can investigate a possible statistical false
+# positive or an issue that engineering limits have not captured.
+if threshold_alert and z_alert_now and ai_alert_now:
+    layer_interpretation = "All detection layers agree: current reading is anomalous."
+    layer_interpretation_type = "error"
+elif threshold_alert and not ai_alert_now:
+    layer_interpretation = (
+        "Engineering alert: the reading is outside the configured envelope, "
+        "while the AI layer does not currently classify it as anomalous."
+    )
+    layer_interpretation_type = "warning"
+elif ai_alert_now and not threshold_alert and not z_alert_now:
+    layer_interpretation = (
+        "AI-only signal: engineering limits and Z-score remain normal. "
+        "This may represent a statistical false positive or an emerging pattern "
+        "not captured by the engineering envelope."
+    )
+    layer_interpretation_type = "warning"
+elif ai_alert_now and not threshold_alert:
+    layer_interpretation = (
+        "AI signal detected while the reading remains inside the engineering "
+        "envelope; investigate the statistical deviation."
+    )
+    layer_interpretation_type = "warning"
+else:
+    layer_interpretation = "Detection layers agree: current reading is within normal conditions."
+    layer_interpretation_type = "success"
 
-# ---------------------------------------------------------------------------
-# Scenario banner + progress bar
-# ---------------------------------------------------------------------------
 banner_fn = {"normal": st.success, "warning": st.warning, "critical": st.error}[
     stage.severity
 ]
@@ -222,9 +224,6 @@ if st.session_state.demo_running:
     frac = min(elapsed / TOTAL_DURATION, 1.0)
     st.progress(frac, text=f"{elapsed:0.0f}s / {int(TOTAL_DURATION)}s")
 
-# ---------------------------------------------------------------------------
-# Status row
-# ---------------------------------------------------------------------------
 cols = st.columns(5)
 cols[0].metric("Pressure", f"{pressure:.1f} PSI")
 cols[1].metric("Engineering", "ALERT" if threshold_alert else "SAFE")
@@ -233,37 +232,41 @@ cols[3].metric("AI Layer", "ANOMALOUS" if ai_alert_now else "NORMAL")
 cols[4].metric("Node", node_status)
 
 st.caption(
-    f"Live status reflects the current reading only ({pressure:.1f} PSI, "
-    "most recent tick). Historical events in the displayed window are "
-    "listed separately below."
+    f"All live indicators are evaluated from the current reading ({pressure:.1f} PSI). "
+    f"Z-score = {z_score_now:+.2f}; AI score = {ai_score_now:+.3f}. "
+    "Historical event counts are shown separately."
 )
+
+if layer_interpretation_type == "error":
+    st.error(layer_interpretation)
+elif layer_interpretation_type == "warning":
+    st.warning(layer_interpretation)
+else:
+    st.success(layer_interpretation)
 
 st.divider()
 
 status_cols = st.columns(2)
 with status_cols[0]:
     if st.session_state.tamper.tamper_detected:
-        st.error("TAMPER ALERT \u2014 physical interference signal detected.")
+        st.error("TAMPER ALERT — physical interference signal detected.")
     else:
-        st.success("TAMPER STATUS \u2014 SECURE")
+        st.success("TAMPER STATUS — SECURE")
 
 with status_cols[1]:
     if node_status == "ONLINE":
-        st.success("HEARTBEAT \u2014 NODE ONLINE")
+        st.success("HEARTBEAT — NODE ONLINE")
     elif node_status == "DEGRADED":
         st.warning(
-            f"HEARTBEAT DEGRADED \u2014 last signal {seconds_since:.0f}s ago. "
+            f"HEARTBEAT DEGRADED — last signal {seconds_since:.0f}s ago. "
             "Investigate before this escalates to an offline alert."
         )
     else:
         st.error(
-            "NODE OFFLINE \u2014 investigate power, communications, equipment failure "
+            "NODE OFFLINE — investigate power, communications, equipment failure "
             "or possible physical interference."
         )
 
-# ---------------------------------------------------------------------------
-# Chart
-# ---------------------------------------------------------------------------
 fig = plot_live_window(
     window,
     threshold_anomalies,
@@ -274,18 +277,13 @@ fig = plot_live_window(
 )
 st.pyplot(fig)
 
-st.subheader("Detection Summary \u2014 historical, across the window shown above")
+st.subheader("Detection Summary — historical, across the window shown above")
 st.caption(
     "These counts describe the whole rolling buffer plotted on the chart, "
     "not the current instant. Use the badges above for the live/current status."
 )
 st.write(f"Engineering threshold events: {len(threshold_anomalies)}")
-st.write(f"Z-score events (|Z| \u2265 {DEMO_CONFIG.z_score_alert}): {len(z_anomalies)}")
-st.write(f"Isolation Forest events: {len(ai_anomalies)}")
-
-st.info(
-    "Prototype scope: Digital Twin + anomaly detection + MQTT-ready telemetry + "
-    "heartbeat + tamper monitoring, with a scripted demo mode for recorded "
-    "walkthroughs. Additional field capabilities can be added after "
-    "site-specific requirements are defined."
+st.write(
+    f"Z-score events (|Z| > {DEMO_CONFIG.z_score_alert}): {len(z_anomalies)}"
 )
+st.write(f"Isolation Forest events: {len(ai_anomalies)}")
