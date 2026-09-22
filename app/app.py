@@ -56,6 +56,8 @@ if "tamper" not in st.session_state:
     st.session_state.tamper = TamperMonitor()
 if "mqtt" not in st.session_state:
     st.session_state.mqtt = None
+if "mqtt_attempted" not in st.session_state:
+    st.session_state.mqtt_attempted = False
 if "demo_running" not in st.session_state:
     st.session_state.demo_running = False
 if "demo_start_ts" not in st.session_state:
@@ -113,7 +115,12 @@ else:
     stage = IDLE_STAGE
     effective_online = True
 
-if st.session_state.mqtt is None and os.getenv("MQTT_BROKER"):
+if st.session_state.mqtt is None and not st.session_state.mqtt_attempted and os.getenv("MQTT_BROKER"):
+    # Only ever attempted once per session, not on every tick. Without this
+    # guard, an unreachable/misconfigured broker makes every single
+    # autorefresh tick (every ~1s) block on a fresh connect() attempt,
+    # which is enough on its own to make the whole dashboard look frozen.
+    st.session_state.mqtt_attempted = True
     try:
         st.session_state.mqtt = MQTTClient(
             os.getenv("MQTT_BROKER"),
@@ -230,12 +237,6 @@ cols[1].metric("Engineering", "ALERT" if threshold_alert else "SAFE")
 cols[2].metric("Z-Score", "ALERT" if z_alert_now else "NORMAL")
 cols[3].metric("AI Layer", "ANOMALOUS" if ai_alert_now else "NORMAL")
 cols[4].metric("Node", node_status)
-
-st.caption(
-    f"All live indicators are evaluated from the current reading ({pressure:.1f} PSI). "
-    f"Z-score = {z_score_now:+.2f}; AI score = {ai_score_now:+.3f}. "
-    "Historical event counts are shown separately."
-)
 
 if layer_interpretation_type == "error":
     st.error(layer_interpretation)
