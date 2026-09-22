@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import numpy as np
 from sklearn.ensemble import IsolationForest
 
@@ -29,8 +31,20 @@ def detect_anomalies_zscore(
     return np.where(np.abs(z_scores) > threshold)[0]
 
 
+@lru_cache(maxsize=8)
 def build_ai_model(config: PipelineConfig = DEMO_CONFIG):
-    """Build a deterministic Isolation Forest from a normal reference population."""
+    """Build a deterministic Isolation Forest from a normal reference population.
+
+    Cached: `config` is a frozen (hashable) dataclass, and for a fixed
+    config this model is 100% deterministic — the same seed always
+    produces the same trained model. Rebuilding it from scratch on every
+    autorefresh tick (every ~1s) cost ~100ms per call in testing, purely
+    wasted work, since the result never changes for a given config. On a
+    resource-constrained host (e.g. Streamlit Community Cloud's free
+    tier) that overhead compounds tick after tick and is enough on its
+    own to make the whole rerun fall behind the 1s autorefresh interval,
+    which is exactly what makes a live chart appear to stall or freeze.
+    """
     rng = np.random.default_rng(config.ai_training_seed)
     normal_reference = rng.normal(
         loc=config.normal_pressure_psi,
